@@ -166,22 +166,48 @@ function parseHitObject(line: string, map: OsuMap) {
   if (isSlider && parts.length > 5) {
     const curveData = parts[5];
     const curveParts = curveData.split('|');
-    const curveType = curveParts[0];
+    // curveParts[0] is curve type (L, B, P, etc.)
     
     obj.curvePoints = [];
     for (let i = 1; i < curveParts.length; i++) {
-      const [px, py] = curveParts[i].split(':');
-      obj.curvePoints.push({ x: parseInt(px), y: parseInt(py) });
+      const coords = curveParts[i].split(':');
+      if (coords.length >= 2) {
+        const px = parseInt(coords[0]);
+        const py = parseInt(coords[1]);
+        // Only add valid points
+        if (!isNaN(px) && !isNaN(py)) {
+          obj.curvePoints.push({ x: px, y: py });
+        }
+      }
     }
 
-    if (parts.length > 6) obj.slides = parseInt(parts[6]);
+    if (parts.length > 6) obj.slides = parseInt(parts[6]) || 1;
     if (parts.length > 7) obj.length = parseFloat(parts[7]);
     
+    // Ensure slides has a default
+    if (!obj.slides) obj.slides = 1;
+    
     // Calculate end time for sliders
-    if (obj.length && obj.slides) {
+    if (obj.length && obj.length > 0 && obj.slides) {
       const beatLength = getBeatLengthAtTime(map, time);
       const sliderTime = (obj.length / (map.sliderMultiplier * 100)) * beatLength;
       obj.endTime = time + sliderTime * obj.slides;
+    } else if (obj.curvePoints && obj.curvePoints.length > 0) {
+      // Fallback: estimate slider time from curve points distance
+      let totalDistance = 0;
+      let prevX = obj.x;
+      let prevY = obj.y;
+      for (const point of obj.curvePoints) {
+        const dx = point.x - prevX;
+        const dy = point.y - prevY;
+        totalDistance += Math.sqrt(dx * dx + dy * dy);
+        prevX = point.x;
+        prevY = point.y;
+      }
+      const beatLength = getBeatLengthAtTime(map, time);
+      const sliderTime = (totalDistance / (map.sliderMultiplier * 100)) * beatLength;
+      obj.endTime = time + sliderTime * (obj.slides || 1);
+      obj.length = totalDistance;
     }
   }
 
@@ -193,12 +219,26 @@ function parseHitObject(line: string, map: OsuMap) {
 }
 
 function getBeatLengthAtTime(map: OsuMap, time: number): number {
-  let beatLength = 1000; // default
+  let beatLength = 500; // default 120 BPM
+  let lastOffset = -Infinity;
+  
   for (const tp of map.timingPoints) {
-    if (tp.offset <= time && tp.uninherited) {
+    if (tp.offset <= time && tp.uninherited && tp.offset >= lastOffset) {
       beatLength = tp.msPerBeat;
+      lastOffset = tp.offset;
     }
   }
+  
+  // Fallback: if no uninherited timing point found, use the first one
+  if (lastOffset === -Infinity && map.timingPoints.length > 0) {
+    for (const tp of map.timingPoints) {
+      if (tp.uninherited && tp.msPerBeat > 0) {
+        beatLength = tp.msPerBeat;
+        break;
+      }
+    }
+  }
+  
   return beatLength;
 }
 

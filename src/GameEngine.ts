@@ -381,8 +381,13 @@ export class GameEngine {
       }
       
       // Calculate current ball position
-      const progress = (currentTime - obj.time) / (obj.endTime - obj.time);
+      const sliderDuration = obj.endTime - obj.time;
+      if (sliderDuration <= 0) continue; // Safety check
+      const progress = (currentTime - obj.time) / sliderDuration;
       const ballPos = this.calculateSliderPosition(obj, progress);
+      
+      // Safety check for ballPos
+      if (!ballPos || isNaN(ballPos.x) || isNaN(ballPos.y)) continue;
       
       // Check if cursor is near the ball
       const dx = this.cursorPos.x - ballPos.x;
@@ -774,8 +779,9 @@ export class GameEngine {
 
     // Draw slider ball if slider is being tracked
     if (objState?.hit && !objState.result && obj.endTime && sliderState?.isTracking) {
-      const sliderProgress = Math.min(1, (currentTime - obj.time) / (obj.endTime - obj.time));
-      if (sliderProgress >= 0 && sliderProgress <= 1) {
+      const sliderDuration = obj.endTime - obj.time;
+      if (sliderDuration > 0) {
+        const sliderProgress = Math.max(0, Math.min(1, (currentTime - obj.time) / sliderDuration));
         const ballPos = this.calculateSliderPosition(obj, sliderProgress);
         const ballScreenPos = this.playfieldToScreen(ballPos.x, ballPos.y);
         
@@ -823,6 +829,9 @@ export class GameEngine {
       return { x: obj.x, y: obj.y };
     }
 
+    // Clamp progress to [0, 1] to avoid negative indices
+    progress = Math.max(0, Math.min(1, progress));
+
     // Simple linear interpolation along the path
     const totalSegments = obj.curvePoints.length;
     const segmentProgress = progress * totalSegments;
@@ -836,6 +845,11 @@ export class GameEngine {
 
     const startPoint = segmentIndex === 0 ? { x: obj.x, y: obj.y } : obj.curvePoints[segmentIndex - 1];
     const endPoint = obj.curvePoints[segmentIndex];
+
+    // Safety check
+    if (!startPoint || !endPoint) {
+      return { x: obj.x, y: obj.y };
+    }
 
     return {
       x: startPoint.x + (endPoint.x - startPoint.x) * segmentT,
