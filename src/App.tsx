@@ -717,70 +717,49 @@ function generateDemoMap(): string {
   const beatLength = 500; // 120 BPM
   const startTime = 2000;
   
-  const patterns = [
-    // Pattern 1: Simple line going right
-    ...Array.from({ length: 8 }, (_, i) => ({
-      x: 80 + i * 45,
-      y: 192,
-      time: startTime + i * beatLength,
-    })),
-    // Pattern 2: Circle pattern
-    ...Array.from({ length: 8 }, (_, i) => {
-      const angle = (Math.PI * 2 * i) / 8;
-      return {
-        x: 256 + Math.cos(angle) * 120,
-        y: 192 + Math.sin(angle) * 120,
-        time: startTime + 8 * beatLength + i * beatLength,
-      };
-    }),
-    // Pattern 3: Zigzag
-    ...Array.from({ length: 8 }, (_, i) => ({
-      x: 80 + i * 50,
-      y: i % 2 === 0 ? 80 : 300,
-      time: startTime + 16 * beatLength + i * beatLength,
-    })),
-    // Pattern 4: Diamond
-    ...Array.from({ length: 4 }, (_, i) => {
-      const positions = [
-        { x: 256, y: 80 },
-        { x: 400, y: 192 },
-        { x: 256, y: 300 },
-        { x: 112, y: 192 },
-      ];
-      return {
-        ...positions[i],
-        time: startTime + 24 * beatLength + i * beatLength,
-      };
-    }),
-    // Pattern 5: Spiral
-    ...Array.from({ length: 12 }, (_, i) => {
-      const angle = (Math.PI * 2 * i) / 6;
-      const radius = 40 + i * 10;
-      return {
-        x: 256 + Math.cos(angle) * radius,
-        y: 192 + Math.sin(angle) * radius,
-        time: startTime + 28 * beatLength + i * (beatLength * 0.75),
-      };
-    }),
-    // Pattern 6: Stream (fast)
-    ...Array.from({ length: 16 }, (_, i) => ({
-      x: 120 + (i % 4) * 80,
-      y: 80 + Math.floor(i / 4) * 70,
-      time: startTime + 37 * beatLength + i * (beatLength * 0.5),
-    })),
-    // Pattern 7: Jump pattern
-    ...Array.from({ length: 8 }, (_, i) => ({
-      x: i % 2 === 0 ? 120 : 400,
-      y: 100 + (i % 4) * 60,
-      time: startTime + 45 * beatLength + i * beatLength,
-    })),
-  ];
+  // Pattern 1: Simple circles going right
+  for (let i = 0; i < 6; i++) {
+    const x = 80 + i * 60;
+    const y = 192;
+    const time = startTime + i * beatLength;
+    hitObjects.push(`${x},${y},${time},1,0`);
+  }
 
-  for (const p of patterns) {
-    // Clamp to playfield
-    const x = Math.max(30, Math.min(480, p.x));
-    const y = Math.max(30, Math.min(354, p.y));
-    hitObjects.push(`${x},${y},${p.time},1,0`);
+  // Pattern 2: Slider (linear)
+  const slider1Time = startTime + 7 * beatLength;
+  hitObjects.push(`100,192,${slider1Time},2,0,L|200:150|300:200|400:192,1,250,0`);
+
+  // Pattern 3: More circles
+  for (let i = 0; i < 4; i++) {
+    const x = 100 + i * 100;
+    const y = i % 2 === 0 ? 100 : 280;
+    const time = slider1Time + beatLength * 2 + i * beatLength;
+    hitObjects.push(`${x},${y},${time},1,0`);
+  }
+
+  // Pattern 4: Another slider (bezier curve)
+  const slider2Time = slider1Time + beatLength * 7;
+  hitObjects.push(`256,80,${slider2Time},2,0,B|300:150|256:250|200:150,1,300,0`);
+
+  // Pattern 5: Circles after slider
+  for (let i = 0; i < 6; i++) {
+    const angle = (Math.PI * 2 * i) / 6;
+    const x = 256 + Math.cos(angle) * 120;
+    const y = 192 + Math.sin(angle) * 100;
+    const time = slider2Time + beatLength * 2 + i * (beatLength * 0.75);
+    hitObjects.push(`${Math.round(x)},${Math.round(y)},${time},1,0`);
+  }
+
+  // Pattern 6: Slider zigzag
+  const slider3Time = slider2Time + beatLength * 8;
+  hitObjects.push(`80,300,${slider3Time},2,0,L|160:100|240:300|320:100|400:300,1,350,0`);
+
+  // Pattern 7: Final circles
+  for (let i = 0; i < 8; i++) {
+    const x = 80 + (i % 4) * 110;
+    const y = 80 + Math.floor(i / 4) * 200;
+    const time = slider3Time + beatLength * 2 + i * (beatLength * 0.5);
+    hitObjects.push(`${x},${y},${time},1,0`);
   }
 
   return `osu file format v14

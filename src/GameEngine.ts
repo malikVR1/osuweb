@@ -244,7 +244,8 @@ export class GameEngine {
     
     for (let i = 0; i < this.hitObjects.length; i++) {
       const obj = this.hitObjects[i];
-      if (!obj.isCircle) continue;
+      // Handle both circles and sliders
+      if (!obj.isCircle && !obj.isSlider) continue;
       if (this.objectStates.get(i)?.hit) continue;
       
       const timeDiff = Math.abs(currentTime - obj.time);
@@ -309,6 +310,36 @@ export class GameEngine {
         size: 3 + Math.random() * 5,
       });
     }
+    
+    // Play hit sound
+    this.playHitSound(judgment);
+  }
+
+  private playHitSound(judgment: string) {
+    const ctx = this.audioCtx;
+    const oscillator = ctx.createOscillator();
+    const gainNode = ctx.createGain();
+    
+    oscillator.connect(gainNode);
+    gainNode.connect(ctx.destination);
+    
+    // Different sounds for different judgments
+    if (judgment === '300') {
+      oscillator.frequency.value = 800;
+      oscillator.type = 'sine';
+    } else if (judgment === '100') {
+      oscillator.frequency.value = 600;
+      oscillator.type = 'sine';
+    } else {
+      oscillator.frequency.value = 400;
+      oscillator.type = 'triangle';
+    }
+    
+    gainNode.gain.setValueAtTime(0.1, ctx.currentTime);
+    gainNode.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.1);
+    
+    oscillator.start(ctx.currentTime);
+    oscillator.stop(ctx.currentTime + 0.1);
   }
 
   private updateAccuracy() {
@@ -355,7 +386,8 @@ export class GameEngine {
     // Check for misses
     for (let i = 0; i < this.hitObjects.length; i++) {
       const obj = this.hitObjects[i];
-      if (!obj.isCircle) continue;
+      // Handle both circles and sliders
+      if (!obj.isCircle && !obj.isSlider) continue;
       if (this.objectStates.get(i)?.hit) continue;
       
       if (currentTime > obj.time + this.hitWindow50) {
@@ -557,10 +589,16 @@ export class GameEngine {
 
   private drawSlider(obj: HitObject, currentTime: number) {
     const ctx = this.ctx;
-    if (!obj.curvePoints || obj.curvePoints.length === 0) return;
+    
+    // If no curve points, just draw as a circle
+    if (!obj.curvePoints || obj.curvePoints.length === 0) {
+      this.drawHitCircle(obj, currentTime);
+      return;
+    }
 
     const pos = this.playfieldToScreen(obj.x, obj.y);
     const radius = this.circleRadius * this.scale;
+    const comboColor = this.comboColors[obj.comboNumber || 0];
 
     // Draw slider path shadow
     ctx.beginPath();
@@ -575,14 +613,14 @@ export class GameEngine {
     ctx.lineJoin = 'round';
     ctx.stroke();
 
-    // Draw slider path
+    // Draw slider path with combo color
     ctx.beginPath();
     ctx.moveTo(pos.x, pos.y);
     for (const point of obj.curvePoints) {
       const p = this.playfieldToScreen(point.x, point.y);
       ctx.lineTo(p.x, p.y);
     }
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+    ctx.strokeStyle = comboColor + '40';
     ctx.lineWidth = radius * 2;
     ctx.stroke();
 
@@ -593,12 +631,69 @@ export class GameEngine {
       const p = this.playfieldToScreen(point.x, point.y);
       ctx.lineTo(p.x, p.y);
     }
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+    ctx.strokeStyle = comboColor + '80';
     ctx.lineWidth = radius * 2 + 4;
     ctx.stroke();
 
+    // Draw slider ball if slider is being hit
+    const objIndex = this.hitObjects.indexOf(obj);
+    const objState = this.objectStates.get(objIndex);
+    if (objState?.hit && !objState.result && obj.endTime) {
+      const sliderProgress = Math.min(1, (currentTime - obj.time) / (obj.endTime - obj.time));
+      if (sliderProgress >= 0 && sliderProgress <= 1) {
+        // Calculate ball position along the path
+        const ballPos = this.calculateSliderPosition(obj, sliderProgress);
+        const ballScreenPos = this.playfieldToScreen(ballPos.x, ballPos.y);
+        
+        // Draw slider ball
+        ctx.beginPath();
+        ctx.arc(ballScreenPos.x, ballScreenPos.y, radius * 0.8, 0, Math.PI * 2);
+        const ballGrad = ctx.createRadialGradient(
+          ballScreenPos.x, ballScreenPos.y, 0,
+          ballScreenPos.x, ballScreenPos.y, radius * 0.8
+        );
+        ballGrad.addColorStop(0, '#FFFFFF');
+        ballGrad.addColorStop(0.5, comboColor);
+        ballGrad.addColorStop(1, comboColor + '80');
+        ctx.fillStyle = ballGrad;
+        ctx.fill();
+        
+        // Ball glow
+        ctx.beginPath();
+        ctx.arc(ballScreenPos.x, ballScreenPos.y, radius * 1.2, 0, Math.PI * 2);
+        ctx.strokeStyle = comboColor;
+        ctx.lineWidth = 3 * this.scale;
+        ctx.stroke();
+      }
+    }
+
     // Start circle
     this.drawHitCircle(obj, currentTime);
+  }
+
+  private calculateSliderPosition(obj: HitObject, progress: number): { x: number; y: number } {
+    if (!obj.curvePoints || obj.curvePoints.length === 0) {
+      return { x: obj.x, y: obj.y };
+    }
+
+    // Simple linear interpolation along the path
+    const totalSegments = obj.curvePoints.length;
+    const segmentProgress = progress * totalSegments;
+    const segmentIndex = Math.floor(segmentProgress);
+    const segmentT = segmentProgress - segmentIndex;
+
+    if (segmentIndex >= totalSegments) {
+      const lastPoint = obj.curvePoints[totalSegments - 1];
+      return { x: lastPoint.x, y: lastPoint.y };
+    }
+
+    const startPoint = segmentIndex === 0 ? { x: obj.x, y: obj.y } : obj.curvePoints[segmentIndex - 1];
+    const endPoint = obj.curvePoints[segmentIndex];
+
+    return {
+      x: startPoint.x + (endPoint.x - startPoint.x) * segmentT,
+      y: startPoint.y + (endPoint.y - startPoint.y) * segmentT,
+    };
   }
 
   private drawSpinner(obj: HitObject, currentTime: number) {
