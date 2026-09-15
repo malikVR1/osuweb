@@ -20,16 +20,18 @@ interface BackgroundStar {
   brightness: number;
 }
 
-interface SliderState {
+// State for an active slider being tracked
+interface SliderTrackingState {
   objectIndex: number;
   startTime: number;
   endTime: number;
-  isTracking: boolean;
+  tracking: boolean;       // currently being followed
+  completed: boolean;      // reached the end
+  failed: boolean;         // player let go or went off-path
   ticksHit: number;
-  totalTicks: number;
+  ticksTotal: number;
   lastTickTime: number;
-  completed: boolean;
-  failed: boolean;
+  framesOffCursor: number; // how many frames cursor was away from ball
 }
 
 export class GameEngine {
@@ -54,8 +56,19 @@ export class GameEngine {
   private hitWindow50: number;
   private onStateChange: (state: GameState) => void;
   private onEnd: (state: GameState, results: HitResult[]) => void;
-  private objectStates: Map<number, { hit: boolean; result?: string; resultTime?: number }> = new Map();
-  private activeSliders: Map<number, SliderState> = new Map();
+
+  // Object states: tracks whether object has been "claimed" by the player
+  // For circles: { hit: true, result: '300'|'100'|'50'|'miss', resultTime }
+  // For sliders: { hit: true } while tracking, then { hit: true, result: ... } when done
+  private objectStates: Map<number, {
+    hit: boolean;
+    result?: string;
+    resultTime?: number;
+  }> = new Map();
+
+  // Active sliders being tracked
+  private activeSliders: Map<number, SliderTrackingState> = new Map();
+
   private scale: number = 1;
   private offsetX: number = 0;
   private offsetY: number = 0;
@@ -113,7 +126,7 @@ export class GameEngine {
       health: 1,
     };
 
-    // Initialize background stars
+    // Background stars
     for (let i = 0; i < 50; i++) {
       this.bgStars.push({
         x: Math.random() * 512,
@@ -212,7 +225,6 @@ export class GameEngine {
 
   private handleMouseUp(_e: MouseEvent) {
     this.cursorPressed = false;
-    this.checkSliderRelease();
   }
 
   private handleTouchStart(e: TouchEvent) {
@@ -233,7 +245,6 @@ export class GameEngine {
   private handleTouchEnd(e: TouchEvent) {
     e.preventDefault();
     this.cursorPressed = false;
-    this.checkSliderRelease();
   }
 
   private handleKeyDown(e: KeyboardEvent) {
@@ -246,7 +257,6 @@ export class GameEngine {
   private handleKeyUp(e: KeyboardEvent) {
     if (e.key === 'z' || e.key === 'x' || e.key === 'Z' || e.key === 'X') {
       this.cursorPressed = false;
-      this.checkSliderRelease();
     }
   }
 
@@ -255,125 +265,165 @@ export class GameEngine {
     return (this.audioCtx.currentTime - this.startTime) * 1000;
   }
 
+  // Check if player pressed on any upcoming hit object (circle or slider start)
   private checkHit() {
     const currentTime = this.getCurrentTime();
     
     for (let i = 0; i < this.hitObjects.length; i++) {
       const obj = this.hitObjects[i];
-      // Handle both circles and sliders
       if (!obj.isCircle && !obj.isSlider) continue;
-      if (this.objectStates.get(i)?.hit) continue;
+      
+      // Skip if already claimed
+      if (this.objectStates.has(i)) continue;
       
       const timeDiff = Math.abs(currentTime - obj.time);
-      
       if (timeDiff > this.hitWindow50) continue;
       
-      // Check distance
+      // Check distance from cursor to object position
       const dx = this.cursorPos.x - obj.x;
       const dy = this.cursorPos.y - obj.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
       
       if (dist > this.circleRadius + 15) continue;
       
-      // Hit!
-      this.objectStates.set(i, { hit: true, result: undefined, resultTime: currentTime });
-      
-      let judgment: '300' | '100' | '50';
-      if (timeDiff <= this.hitWindow300) {
-        judgment = '300';
-        this.state.hits300++;
-      } else if (timeDiff <= this.hitWindow100) {
-        judgment = '100';
-        this.state.hits100++;
-      } else {
-        judgment = '50';
-        this.state.hits50++;
+      // HIT!
+      if (obj.isCircle) {
+        // Circle: immediately judge
+        this.hitCircle(i, obj, currentTime, timeDiff);
+      } else if (obj.isSlider) {
+        // Slider: start tracking (don't judge yet)
+        this.startSlider(i, obj, currentTime, timeDiff);
       }
       
-      // Score calculation
-      const baseScore = judgment === '300' ? 300 : judgment === '100' ? 100 : 50;
-      this.state.score += Math.floor(baseScore * (1 + this.state.combo * 0.05));
-      
-      this.state.combo++;
-      this.state.maxCombo = Math.max(this.state.maxCombo, this.state.combo);
-      this.state.health = Math.min(1, this.state.health + 0.02);
-      
-      this.results.push({ time: currentTime, judgment, x: obj.x, y: obj.y });
-      this.hitErrors.push(currentTime - obj.time);
-      
-      // Spawn particles
-      this.spawnParticles(obj.x, obj.y, judgment);
-      
-      // If it's a slider, start tracking
-      if (obj.isSlider && obj.endTime) {
-        this.startSliderTracking(i, currentTime, obj.endTime);
-      }
-      
-      this.updateAccuracy();
-      this.onStateChange({ ...this.state });
-      break;
+      break; // only hit one object per press
     }
   }
 
-  private startSliderTracking(objectIndex: number, startTime: number, endTime: number) {
-    const obj = this.hitObjects[objectIndex];
-    const sliderDuration = endTime - obj.time;
+  private hitCircle(index: number, obj: HitObject, currentTime: number, timeDiff: number) {
+    let judgment: '300' | '100' | '50';
+    if (timeDiff <= this.hitWindow300) {
+      judgment = '300';
+      this.state.hits300++;
+    } else if (timeDiff <= this.hitWindow100) {
+      judgment = '100';
+      this.state.hits100++;
+    } else {
+      judgment = '50';
+      this.state.hits50++;
+    }
     
-    // Calculate number of ticks based on slider length and tick rate
-    const tickInterval = sliderDuration / (this.map.sliderTickRate * (obj.slides || 1));
-    const totalTicks = Math.floor(sliderDuration / tickInterval);
+    this.objectStates.set(index, { hit: true, result: judgment, resultTime: currentTime });
     
-    this.activeSliders.set(objectIndex, {
-      objectIndex,
-      startTime,
-      endTime,
-      isTracking: true,
-      ticksHit: 0,
-      totalTicks,
-      lastTickTime: startTime,
-      completed: false,
-      failed: false,
-    });
+    const baseScore = judgment === '300' ? 300 : judgment === '100' ? 100 : 50;
+    this.state.score += Math.floor(baseScore * (1 + this.state.combo * 0.05));
+    this.state.combo++;
+    this.state.maxCombo = Math.max(this.state.maxCombo, this.state.combo);
+    this.state.health = Math.min(1, this.state.health + 0.02);
+    
+    this.results.push({ time: currentTime, judgment, x: obj.x, y: obj.y });
+    this.hitErrors.push(currentTime - obj.time);
+    
+    this.spawnParticles(obj.x, obj.y, judgment);
+    this.updateAccuracy();
+    this.onStateChange({ ...this.state });
   }
 
-  private checkSliderRelease() {
-    const currentTime = this.getCurrentTime();
+  private startSlider(index: number, obj: HitObject, currentTime: number, timeDiff: number) {
+    // Judge the initial hit (head of slider)
+    let judgment: '300' | '100' | '50';
+    if (timeDiff <= this.hitWindow300) {
+      judgment = '300';
+      this.state.hits300++;
+    } else if (timeDiff <= this.hitWindow100) {
+      judgment = '100';
+      this.state.hits100++;
+    } else {
+      judgment = '50';
+      this.state.hits50++;
+    }
     
-    for (const [index, slider] of this.activeSliders.entries()) {
-      if (!slider.isTracking || slider.completed || slider.failed) continue;
+    const baseScore = judgment === '300' ? 300 : judgment === '100' ? 100 : 50;
+    this.state.score += Math.floor(baseScore * (1 + this.state.combo * 0.05));
+    this.state.combo++;
+    this.state.maxCombo = Math.max(this.state.maxCombo, this.state.combo);
+    
+    this.results.push({ time: currentTime, judgment, x: obj.x, y: obj.y });
+    this.hitErrors.push(currentTime - obj.time);
+    
+    this.spawnParticles(obj.x, obj.y, judgment);
+    
+    // Mark as hit but WITHOUT result — means "currently tracking"
+    this.objectStates.set(index, { hit: true });
+    
+    // Start slider tracking
+    if (obj.endTime && obj.endTime > obj.time) {
+      const sliderDuration = obj.endTime - obj.time;
+      // Number of ticks: roughly one per beat subdivision
+      const tickRate = this.map.sliderTickRate || 1;
+      const beatsInSlider = sliderDuration / this.getBeatLengthAt(obj.time);
+      const ticksTotal = Math.max(1, Math.floor(beatsInSlider * tickRate));
       
-      // If button released before slider ends, fail the slider
-      if (currentTime < slider.endTime) {
-        slider.failed = true;
-        slider.isTracking = false;
-        this.state.combo = 0;
-        this.state.misses++;
-        this.state.health = Math.max(0, this.state.health - 0.1);
-        this.results.push({ time: currentTime, judgment: 'miss', x: 0, y: 0 });
-        this.updateAccuracy();
-        this.onStateChange({ ...this.state });
+      this.activeSliders.set(index, {
+        objectIndex: index,
+        startTime: obj.time,
+        endTime: obj.endTime,
+        tracking: true,
+        completed: false,
+        failed: false,
+        ticksHit: 0,
+        ticksTotal,
+        lastTickTime: obj.time,
+        framesOffCursor: 0,
+      });
+    }
+    
+    this.updateAccuracy();
+    this.onStateChange({ ...this.state });
+  }
+
+  private getBeatLengthAt(time: number): number {
+    let beatLength = 500;
+    let lastOffset = -Infinity;
+    for (const tp of this.map.timingPoints) {
+      if (tp.offset <= time && tp.uninherited && tp.offset >= lastOffset) {
+        beatLength = tp.msPerBeat;
+        lastOffset = tp.offset;
       }
     }
+    return beatLength;
   }
 
+  // Called every frame — check if player is following the slider ball
   private updateActiveSliders(currentTime: number) {
     for (const [index, slider] of this.activeSliders.entries()) {
-      if (!slider.isTracking || slider.completed || slider.failed) continue;
+      if (slider.completed || slider.failed) continue;
       
       const obj = this.hitObjects[index];
       if (!obj.endTime) continue;
       
-      // Check if slider is complete
+      const sliderDuration = obj.endTime - obj.time;
+      if (sliderDuration <= 0) continue;
+      
+      // Check if slider time has ended
       if (currentTime >= slider.endTime) {
+        // Slider completed!
         slider.completed = true;
-        slider.isTracking = false;
+        slider.tracking = false;
         
-        // Award points for completing the slider
-        const tickScore = 30;
-        this.state.score += tickScore * slider.ticksHit;
+        // Finalize the object state
+        this.objectStates.set(index, {
+          hit: true,
+          result: 'complete',
+          resultTime: currentTime,
+        });
         
-        // Bonus for completing
-        this.state.score += 100;
+        // Award score for ticks
+        const tickRatio = slider.ticksTotal > 0 ? slider.ticksHit / slider.ticksTotal : 1;
+        this.state.score += Math.floor(100 * tickRatio);
+        
+        // Spawn completion particles at end position
+        const endPos = this.calculateSliderPosition(obj, 1);
+        this.spawnParticles(endPos.x, endPos.y, '300');
         
         this.updateAccuracy();
         this.onStateChange({ ...this.state });
@@ -381,12 +431,9 @@ export class GameEngine {
       }
       
       // Calculate current ball position
-      const sliderDuration = obj.endTime - obj.time;
-      if (sliderDuration <= 0) continue; // Safety check
       const progress = (currentTime - obj.time) / sliderDuration;
       const ballPos = this.calculateSliderPosition(obj, progress);
       
-      // Safety check for ballPos
       if (!ballPos || isNaN(ballPos.x) || isNaN(ballPos.y)) continue;
       
       // Check if cursor is near the ball
@@ -394,29 +441,42 @@ export class GameEngine {
       const dy = this.cursorPos.y - ballPos.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
       
-      // Check for ticks
-      const tickInterval = (obj.endTime - obj.time) / (this.map.sliderTickRate * (obj.slides || 1));
-      const timeSinceLastTick = currentTime - slider.lastTickTime;
+      const isFollowing = this.cursorPressed && dist < this.circleRadius * 1.8;
       
-      if (timeSinceLastTick >= tickInterval) {
-        // Check if cursor is following the ball
-        if (dist < this.circleRadius * 1.5 && this.cursorPressed) {
+      if (isFollowing) {
+        slider.framesOffCursor = 0;
+        
+        // Check for ticks (score points periodically)
+        const tickInterval = sliderDuration / slider.ticksTotal;
+        const timeSinceLastTick = currentTime - slider.lastTickTime;
+        
+        if (timeSinceLastTick >= tickInterval) {
           slider.ticksHit++;
           slider.lastTickTime = currentTime;
-          
-          // Small score for each tick
-          this.state.score += 10;
-          
-          // Spawn small particles
+          this.state.score += 30;
           this.spawnSmallParticles(ballPos.x, ballPos.y);
-        } else {
-          // Failed to follow - slider fails
+          this.onStateChange({ ...this.state });
+        }
+      } else {
+        slider.framesOffCursor++;
+        
+        // If player lets go or goes too far for too long (~150ms = ~9 frames at 60fps), fail
+        if (!this.cursorPressed || slider.framesOffCursor > 9) {
           slider.failed = true;
-          slider.isTracking = false;
+          slider.tracking = false;
+          
+          // Mark as miss
+          this.objectStates.set(index, {
+            hit: true,
+            result: 'miss',
+            resultTime: currentTime,
+          });
+          
           this.state.combo = 0;
           this.state.misses++;
           this.state.health = Math.max(0, this.state.health - 0.1);
           this.results.push({ time: currentTime, judgment: 'miss', x: ballPos.x, y: ballPos.y });
+          
           this.updateAccuracy();
           this.onStateChange({ ...this.state });
         }
@@ -426,7 +486,7 @@ export class GameEngine {
 
   private spawnSmallParticles(x: number, y: number) {
     for (let i = 0; i < 4; i++) {
-      const angle = (Math.PI * 2 * i) / 4;
+      const angle = (Math.PI * 2 * i) / 4 + Math.random() * 0.5;
       const speed = 1 + Math.random() * 2;
       this.particles.push({
         x, y,
@@ -456,8 +516,6 @@ export class GameEngine {
         size: 3 + Math.random() * 5,
       });
     }
-    
-    // Play hit sound
     this.playHitSound(judgment);
   }
 
@@ -528,11 +586,28 @@ export class GameEngine {
     const currentTime = this.getCurrentTime();
     this.frameCount++;
     
-    // Check for misses (circles only)
+    // Check for misses on circles (not sliders — they have their own tracking)
     for (let i = 0; i < this.hitObjects.length; i++) {
       const obj = this.hitObjects[i];
-      if (!obj.isCircle) continue;
-      if (this.objectStates.get(i)?.hit) continue;
+      if (!obj.isCircle) continue; // only circles auto-miss
+      if (this.objectStates.has(i)) continue;
+      
+      if (currentTime > obj.time + this.hitWindow50) {
+        this.objectStates.set(i, { hit: true, result: 'miss', resultTime: currentTime });
+        this.state.combo = 0;
+        this.state.misses++;
+        this.state.health = Math.max(0, this.state.health - 0.05);
+        this.results.push({ time: currentTime, judgment: 'miss', x: obj.x, y: obj.y });
+        this.updateAccuracy();
+        this.onStateChange({ ...this.state });
+      }
+    }
+
+    // Check for missed sliders (never clicked in time)
+    for (let i = 0; i < this.hitObjects.length; i++) {
+      const obj = this.hitObjects[i];
+      if (!obj.isSlider) continue;
+      if (this.objectStates.has(i)) continue;
       
       if (currentTime > obj.time + this.hitWindow50) {
         this.objectStates.set(i, { hit: true, result: 'miss', resultTime: currentTime });
@@ -626,27 +701,45 @@ export class GameEngine {
   }
 
   private renderObjects(currentTime: number) {
-    const ctx = this.ctx;
-
     // Collect visible objects
     const visibleObjects: { obj: HitObject; index: number }[] = [];
     
     for (let i = 0; i < this.hitObjects.length; i++) {
       const obj = this.hitObjects[i];
       const objState = this.objectStates.get(i);
+      const sliderState = this.activeSliders.get(i);
       
-      if (objState?.hit) {
+      // For circles: show hit effect after being hit
+      if (obj.isCircle && objState?.hit) {
         if (objState.resultTime && currentTime - objState.resultTime < 600) {
           if (objState.result === 'miss') {
             this.drawMissEffect(obj.x, obj.y, currentTime - objState.resultTime);
           } else {
-            const elapsed = currentTime - objState.resultTime;
-            this.drawHitEffect(obj.x, obj.y, objState.result || '300', elapsed);
+            this.drawHitEffect(obj.x, obj.y, objState.result || '300', currentTime - objState.resultTime);
           }
         }
         continue;
       }
       
+      // For sliders: if currently tracking, render it!
+      if (obj.isSlider && objState?.hit && sliderState && !sliderState.completed && !sliderState.failed) {
+        this.drawSlider(obj, currentTime, sliderState);
+        continue;
+      }
+      
+      // For sliders: show hit/miss effect after completion
+      if (obj.isSlider && objState?.hit && (sliderState?.completed || sliderState?.failed || objState.result)) {
+        if (objState.resultTime && currentTime - objState.resultTime < 600) {
+          if (objState.result === 'miss') {
+            this.drawMissEffect(obj.x, obj.y, currentTime - objState.resultTime);
+          } else if (objState.result === 'complete') {
+            this.drawHitEffect(obj.x, obj.y, '300', currentTime - objState.resultTime);
+          }
+        }
+        continue;
+      }
+      
+      // Not yet hit — check if visible (approach circle phase)
       const timeUntilHit = obj.time - currentTime;
       if (timeUntilHit > this.approachTime + 100) continue;
       if (timeUntilHit < -this.hitWindow50 - 300) continue;
@@ -660,7 +753,7 @@ export class GameEngine {
       if (obj.isCircle) {
         this.drawHitCircle(obj, currentTime);
       } else if (obj.isSlider) {
-        this.drawSlider(obj, currentTime);
+        this.drawSlider(obj, currentTime, null);
       } else if (obj.isSpinner) {
         this.drawSpinner(obj, currentTime);
       }
@@ -726,10 +819,9 @@ export class GameEngine {
     ctx.fill();
   }
 
-  private drawSlider(obj: HitObject, currentTime: number) {
+  private drawSlider(obj: HitObject, currentTime: number, sliderState: SliderTrackingState | null) {
     const ctx = this.ctx;
     
-    // If no curve points, just draw as a circle
     if (!obj.curvePoints || obj.curvePoints.length === 0) {
       this.drawHitCircle(obj, currentTime);
       return;
@@ -738,9 +830,8 @@ export class GameEngine {
     const pos = this.playfieldToScreen(obj.x, obj.y);
     const radius = this.circleRadius * this.scale;
     const comboColor = this.comboColors[obj.comboNumber || 0];
-    const objIndex = this.hitObjects.indexOf(obj);
-    const objState = this.objectStates.get(objIndex);
-    const sliderState = this.activeSliders.get(objIndex);
+    const isTracking = sliderState?.tracking === true;
+    const isFailed = sliderState?.failed === true;
 
     // Draw slider path shadow
     ctx.beginPath();
@@ -755,14 +846,14 @@ export class GameEngine {
     ctx.lineJoin = 'round';
     ctx.stroke();
 
-    // Draw slider path with combo color
+    // Draw slider path fill
     ctx.beginPath();
     ctx.moveTo(pos.x, pos.y);
     for (const point of obj.curvePoints) {
       const p = this.playfieldToScreen(point.x, point.y);
       ctx.lineTo(p.x, p.y);
     }
-    ctx.strokeStyle = comboColor + '40';
+    ctx.strokeStyle = isFailed ? 'rgba(255, 50, 50, 0.2)' : comboColor + '40';
     ctx.lineWidth = radius * 2;
     ctx.stroke();
 
@@ -773,55 +864,96 @@ export class GameEngine {
       const p = this.playfieldToScreen(point.x, point.y);
       ctx.lineTo(p.x, p.y);
     }
-    ctx.strokeStyle = comboColor + '80';
+    ctx.strokeStyle = isFailed ? 'rgba(255, 50, 50, 0.5)' : comboColor + '80';
     ctx.lineWidth = radius * 2 + 4;
     ctx.stroke();
 
-    // Draw slider ball if slider is being tracked
-    if (objState?.hit && !objState.result && obj.endTime && sliderState?.isTracking) {
+    // Draw slider ball and trail if tracking
+    if (isTracking && obj.endTime) {
       const sliderDuration = obj.endTime - obj.time;
       if (sliderDuration > 0) {
         const sliderProgress = Math.max(0, Math.min(1, (currentTime - obj.time) / sliderDuration));
         const ballPos = this.calculateSliderPosition(obj, sliderProgress);
-        const ballScreenPos = this.playfieldToScreen(ballPos.x, ballPos.y);
         
-        // Draw slider ball
-        ctx.beginPath();
-        ctx.arc(ballScreenPos.x, ballScreenPos.y, radius * 0.8, 0, Math.PI * 2);
-        const ballGrad = ctx.createRadialGradient(
-          ballScreenPos.x, ballScreenPos.y, 0,
-          ballScreenPos.x, ballScreenPos.y, radius * 0.8
-        );
-        ballGrad.addColorStop(0, '#FFFFFF');
-        ballGrad.addColorStop(0.5, comboColor);
-        ballGrad.addColorStop(1, comboColor + '80');
-        ctx.fillStyle = ballGrad;
-        ctx.fill();
-        
-        // Ball glow
-        ctx.beginPath();
-        ctx.arc(ballScreenPos.x, ballScreenPos.y, radius * 1.2, 0, Math.PI * 2);
-        ctx.strokeStyle = comboColor;
-        ctx.lineWidth = 3 * this.scale;
-        ctx.stroke();
-
-        // Draw trail effect
-        const trailLength = 5;
-        for (let i = 1; i <= trailLength; i++) {
-          const trailProgress = Math.max(0, sliderProgress - i * 0.02);
-          const trailPos = this.calculateSliderPosition(obj, trailProgress);
-          const trailScreenPos = this.playfieldToScreen(trailPos.x, trailPos.y);
+        if (ballPos && !isNaN(ballPos.x) && !isNaN(ballPos.y)) {
+          const ballScreenPos = this.playfieldToScreen(ballPos.x, ballPos.y);
           
+          // Draw trail
+          const trailLength = 8;
+          for (let i = trailLength; i >= 1; i--) {
+            const trailProgress = Math.max(0, sliderProgress - i * 0.015);
+            const trailPos = this.calculateSliderPosition(obj, trailProgress);
+            const trailScreenPos = this.playfieldToScreen(trailPos.x, trailPos.y);
+            
+            ctx.beginPath();
+            ctx.arc(trailScreenPos.x, trailScreenPos.y, radius * 0.7 * (1 - i / (trailLength + 1)), 0, Math.PI * 2);
+            const trailAlpha = Math.floor((1 - i / (trailLength + 1)) * 150);
+            ctx.fillStyle = comboColor + trailAlpha.toString(16).padStart(2, '0');
+            ctx.fill();
+          }
+          
+          // Draw slider ball
           ctx.beginPath();
-          ctx.arc(trailScreenPos.x, trailScreenPos.y, radius * 0.6 * (1 - i / trailLength), 0, Math.PI * 2);
-          ctx.fillStyle = comboColor + Math.floor((1 - i / trailLength) * 100).toString(16).padStart(2, '0');
+          ctx.arc(ballScreenPos.x, ballScreenPos.y, radius * 0.85, 0, Math.PI * 2);
+          const ballGrad = ctx.createRadialGradient(
+            ballScreenPos.x, ballScreenPos.y, 0,
+            ballScreenPos.x, ballScreenPos.y, radius * 0.85
+          );
+          ballGrad.addColorStop(0, '#FFFFFF');
+          ballGrad.addColorStop(0.4, comboColor);
+          ballGrad.addColorStop(1, comboColor + 'AA');
+          ctx.fillStyle = ballGrad;
+          ctx.fill();
+          
+          // Ball border
+          ctx.beginPath();
+          ctx.arc(ballScreenPos.x, ballScreenPos.y, radius * 0.85, 0, Math.PI * 2);
+          ctx.strokeStyle = '#FFFFFF';
+          ctx.lineWidth = Math.max(2, 2.5 * this.scale);
+          ctx.stroke();
+          
+          // Ball glow
+          const glowGrad = ctx.createRadialGradient(
+            ballScreenPos.x, ballScreenPos.y, radius * 0.5,
+            ballScreenPos.x, ballScreenPos.y, radius * 1.8
+          );
+          glowGrad.addColorStop(0, comboColor + '40');
+          glowGrad.addColorStop(1, comboColor + '00');
+          ctx.beginPath();
+          ctx.arc(ballScreenPos.x, ballScreenPos.y, radius * 1.8, 0, Math.PI * 2);
+          ctx.fillStyle = glowGrad;
           ctx.fill();
         }
       }
     }
 
-    // Start circle
-    this.drawHitCircle(obj, currentTime);
+    // Draw start circle (with approach circle if not yet hit)
+    const objIndex = this.hitObjects.indexOf(obj);
+    const objState = this.objectStates.get(objIndex);
+    if (!objState?.hit) {
+      this.drawHitCircle(obj, currentTime);
+    } else {
+      // Just draw the circle body without approach circle
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
+      ctx.fillStyle = comboColor + '30';
+      ctx.fill();
+      
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, radius * 0.85, 0, Math.PI * 2);
+      const bodyGrad = ctx.createRadialGradient(pos.x - radius * 0.3, pos.y - radius * 0.3, 0, pos.x, pos.y, radius);
+      bodyGrad.addColorStop(0, comboColor + 'CC');
+      bodyGrad.addColorStop(0.6, comboColor + '88');
+      bodyGrad.addColorStop(1, comboColor + '44');
+      ctx.fillStyle = bodyGrad;
+      ctx.fill();
+      
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = Math.max(2, 3 * this.scale);
+      ctx.stroke();
+    }
   }
 
   private calculateSliderPosition(obj: HitObject, progress: number): { x: number; y: number } {
@@ -829,10 +961,9 @@ export class GameEngine {
       return { x: obj.x, y: obj.y };
     }
 
-    // Clamp progress to [0, 1] to avoid negative indices
+    // Clamp progress to [0, 1]
     progress = Math.max(0, Math.min(1, progress));
 
-    // Simple linear interpolation along the path
     const totalSegments = obj.curvePoints.length;
     const segmentProgress = progress * totalSegments;
     const segmentIndex = Math.floor(segmentProgress);
@@ -843,10 +974,11 @@ export class GameEngine {
       return { x: lastPoint.x, y: lastPoint.y };
     }
 
-    const startPoint = segmentIndex === 0 ? { x: obj.x, y: obj.y } : obj.curvePoints[segmentIndex - 1];
+    const startPoint = segmentIndex === 0 
+      ? { x: obj.x, y: obj.y } 
+      : obj.curvePoints[segmentIndex - 1];
     const endPoint = obj.curvePoints[segmentIndex];
 
-    // Safety check
     if (!startPoint || !endPoint) {
       return { x: obj.x, y: obj.y };
     }
