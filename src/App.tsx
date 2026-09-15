@@ -453,6 +453,7 @@ function MenuScreen({ onImportOsu, onImportOsz, onLoadDemo, onSongSelect, songCo
       {/* Instructions */}
       <div className="mt-2 text-center text-gray-500 text-sm max-w-md space-y-1">
         <p>🎯 Click/tap circles in time with the music</p>
+        <p>🎚️ <strong className="text-gray-300">Hold</strong> the button and follow the slider ball along the path</p>
         <p>⌨️ Use <kbd className="px-1.5 py-0.5 bg-gray-700 rounded text-xs text-gray-300">Z</kbd> and <kbd className="px-1.5 py-0.5 bg-gray-700 rounded text-xs text-gray-300">X</kbd> keys or mouse/touch</p>
         <p>📦 .osz files include audio — .osu files need audio separately</p>
         <p>⎋ Press <kbd className="px-1.5 py-0.5 bg-gray-700 rounded text-xs text-gray-300">Esc</kbd> to quit during gameplay</p>
@@ -604,7 +605,7 @@ function PlayingScreen({ canvasRef, gameState, song, onQuit }: {
 
         {/* Controls hint */}
         <div className="absolute bottom-4 right-4 text-gray-500 text-xs pointer-events-none bg-black/40 px-3 py-1.5 rounded-lg">
-          Click/Tap or Z/X to hit • Esc to quit
+          Click/Tap or Z/X to hit • Hold for sliders • Esc to quit
         </div>
       </div>
     </div>

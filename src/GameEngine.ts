@@ -20,6 +20,18 @@ interface BackgroundStar {
   brightness: number;
 }
 
+interface SliderState {
+  objectIndex: number;
+  startTime: number;
+  endTime: number;
+  isTracking: boolean;
+  ticksHit: number;
+  totalTicks: number;
+  lastTickTime: number;
+  completed: boolean;
+  failed: boolean;
+}
+
 export class GameEngine {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
@@ -43,6 +55,7 @@ export class GameEngine {
   private onStateChange: (state: GameState) => void;
   private onEnd: (state: GameState, results: HitResult[]) => void;
   private objectStates: Map<number, { hit: boolean; result?: string; resultTime?: number }> = new Map();
+  private activeSliders: Map<number, SliderState> = new Map();
   private scale: number = 1;
   private offsetX: number = 0;
   private offsetY: number = 0;
@@ -199,6 +212,7 @@ export class GameEngine {
 
   private handleMouseUp(_e: MouseEvent) {
     this.cursorPressed = false;
+    this.checkSliderRelease();
   }
 
   private handleTouchStart(e: TouchEvent) {
@@ -219,6 +233,7 @@ export class GameEngine {
   private handleTouchEnd(e: TouchEvent) {
     e.preventDefault();
     this.cursorPressed = false;
+    this.checkSliderRelease();
   }
 
   private handleKeyDown(e: KeyboardEvent) {
@@ -231,6 +246,7 @@ export class GameEngine {
   private handleKeyUp(e: KeyboardEvent) {
     if (e.key === 'z' || e.key === 'x' || e.key === 'Z' || e.key === 'X') {
       this.cursorPressed = false;
+      this.checkSliderRelease();
     }
   }
 
@@ -274,7 +290,7 @@ export class GameEngine {
         this.state.hits50++;
       }
       
-      // Score calculation (like osu!)
+      // Score calculation
       const baseScore = judgment === '300' ? 300 : judgment === '100' ? 100 : 50;
       this.state.score += Math.floor(baseScore * (1 + this.state.combo * 0.05));
       
@@ -288,9 +304,134 @@ export class GameEngine {
       // Spawn particles
       this.spawnParticles(obj.x, obj.y, judgment);
       
+      // If it's a slider, start tracking
+      if (obj.isSlider && obj.endTime) {
+        this.startSliderTracking(i, currentTime, obj.endTime);
+      }
+      
       this.updateAccuracy();
       this.onStateChange({ ...this.state });
       break;
+    }
+  }
+
+  private startSliderTracking(objectIndex: number, startTime: number, endTime: number) {
+    const obj = this.hitObjects[objectIndex];
+    const sliderDuration = endTime - obj.time;
+    
+    // Calculate number of ticks based on slider length and tick rate
+    const tickInterval = sliderDuration / (this.map.sliderTickRate * (obj.slides || 1));
+    const totalTicks = Math.floor(sliderDuration / tickInterval);
+    
+    this.activeSliders.set(objectIndex, {
+      objectIndex,
+      startTime,
+      endTime,
+      isTracking: true,
+      ticksHit: 0,
+      totalTicks,
+      lastTickTime: startTime,
+      completed: false,
+      failed: false,
+    });
+  }
+
+  private checkSliderRelease() {
+    const currentTime = this.getCurrentTime();
+    
+    for (const [index, slider] of this.activeSliders.entries()) {
+      if (!slider.isTracking || slider.completed || slider.failed) continue;
+      
+      // If button released before slider ends, fail the slider
+      if (currentTime < slider.endTime) {
+        slider.failed = true;
+        slider.isTracking = false;
+        this.state.combo = 0;
+        this.state.misses++;
+        this.state.health = Math.max(0, this.state.health - 0.1);
+        this.results.push({ time: currentTime, judgment: 'miss', x: 0, y: 0 });
+        this.updateAccuracy();
+        this.onStateChange({ ...this.state });
+      }
+    }
+  }
+
+  private updateActiveSliders(currentTime: number) {
+    for (const [index, slider] of this.activeSliders.entries()) {
+      if (!slider.isTracking || slider.completed || slider.failed) continue;
+      
+      const obj = this.hitObjects[index];
+      if (!obj.endTime) continue;
+      
+      // Check if slider is complete
+      if (currentTime >= slider.endTime) {
+        slider.completed = true;
+        slider.isTracking = false;
+        
+        // Award points for completing the slider
+        const tickScore = 30;
+        this.state.score += tickScore * slider.ticksHit;
+        
+        // Bonus for completing
+        this.state.score += 100;
+        
+        this.updateAccuracy();
+        this.onStateChange({ ...this.state });
+        continue;
+      }
+      
+      // Calculate current ball position
+      const progress = (currentTime - obj.time) / (obj.endTime - obj.time);
+      const ballPos = this.calculateSliderPosition(obj, progress);
+      
+      // Check if cursor is near the ball
+      const dx = this.cursorPos.x - ballPos.x;
+      const dy = this.cursorPos.y - ballPos.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      
+      // Check for ticks
+      const tickInterval = (obj.endTime - obj.time) / (this.map.sliderTickRate * (obj.slides || 1));
+      const timeSinceLastTick = currentTime - slider.lastTickTime;
+      
+      if (timeSinceLastTick >= tickInterval) {
+        // Check if cursor is following the ball
+        if (dist < this.circleRadius * 1.5 && this.cursorPressed) {
+          slider.ticksHit++;
+          slider.lastTickTime = currentTime;
+          
+          // Small score for each tick
+          this.state.score += 10;
+          
+          // Spawn small particles
+          this.spawnSmallParticles(ballPos.x, ballPos.y);
+        } else {
+          // Failed to follow - slider fails
+          slider.failed = true;
+          slider.isTracking = false;
+          this.state.combo = 0;
+          this.state.misses++;
+          this.state.health = Math.max(0, this.state.health - 0.1);
+          this.results.push({ time: currentTime, judgment: 'miss', x: ballPos.x, y: ballPos.y });
+          this.updateAccuracy();
+          this.onStateChange({ ...this.state });
+        }
+      }
+    }
+  }
+
+  private spawnSmallParticles(x: number, y: number) {
+    for (let i = 0; i < 4; i++) {
+      const angle = (Math.PI * 2 * i) / 4;
+      const speed = 1 + Math.random() * 2;
+      this.particles.push({
+        x, y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        life: 0.5,
+        maxLife: 0.5,
+        color: '#FFFFFF',
+        size: 2 + Math.random() * 2,
+      });
     }
   }
 
@@ -323,7 +464,6 @@ export class GameEngine {
     oscillator.connect(gainNode);
     gainNode.connect(ctx.destination);
     
-    // Different sounds for different judgments
     if (judgment === '300') {
       oscillator.frequency.value = 800;
       oscillator.type = 'sine';
@@ -383,11 +523,10 @@ export class GameEngine {
     const currentTime = this.getCurrentTime();
     this.frameCount++;
     
-    // Check for misses
+    // Check for misses (circles only)
     for (let i = 0; i < this.hitObjects.length; i++) {
       const obj = this.hitObjects[i];
-      // Handle both circles and sliders
-      if (!obj.isCircle && !obj.isSlider) continue;
+      if (!obj.isCircle) continue;
       if (this.objectStates.get(i)?.hit) continue;
       
       if (currentTime > obj.time + this.hitWindow50) {
@@ -400,6 +539,9 @@ export class GameEngine {
         this.onStateChange({ ...this.state });
       }
     }
+
+    // Update active sliders
+    this.updateActiveSliders(currentTime);
 
     // Check if map is finished
     const lastObject = this.hitObjects[this.hitObjects.length - 1];
@@ -577,14 +719,6 @@ export class GameEngine {
     ctx.arc(pos.x, pos.y, radius * 0.35, 0, Math.PI * 2);
     ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
     ctx.fill();
-
-    // Pulsing inner ring
-    const pulse = 0.5 + 0.5 * Math.sin(currentTime * 0.01);
-    ctx.beginPath();
-    ctx.arc(pos.x, pos.y, radius * (0.5 + pulse * 0.1), 0, Math.PI * 2);
-    ctx.strokeStyle = `rgba(255, 255, 255, ${0.3 + pulse * 0.2})`;
-    ctx.lineWidth = Math.max(1, 1.5 * this.scale);
-    ctx.stroke();
   }
 
   private drawSlider(obj: HitObject, currentTime: number) {
@@ -599,6 +733,9 @@ export class GameEngine {
     const pos = this.playfieldToScreen(obj.x, obj.y);
     const radius = this.circleRadius * this.scale;
     const comboColor = this.comboColors[obj.comboNumber || 0];
+    const objIndex = this.hitObjects.indexOf(obj);
+    const objState = this.objectStates.get(objIndex);
+    const sliderState = this.activeSliders.get(objIndex);
 
     // Draw slider path shadow
     ctx.beginPath();
@@ -635,13 +772,10 @@ export class GameEngine {
     ctx.lineWidth = radius * 2 + 4;
     ctx.stroke();
 
-    // Draw slider ball if slider is being hit
-    const objIndex = this.hitObjects.indexOf(obj);
-    const objState = this.objectStates.get(objIndex);
-    if (objState?.hit && !objState.result && obj.endTime) {
+    // Draw slider ball if slider is being tracked
+    if (objState?.hit && !objState.result && obj.endTime && sliderState?.isTracking) {
       const sliderProgress = Math.min(1, (currentTime - obj.time) / (obj.endTime - obj.time));
       if (sliderProgress >= 0 && sliderProgress <= 1) {
-        // Calculate ball position along the path
         const ballPos = this.calculateSliderPosition(obj, sliderProgress);
         const ballScreenPos = this.playfieldToScreen(ballPos.x, ballPos.y);
         
@@ -664,6 +798,19 @@ export class GameEngine {
         ctx.strokeStyle = comboColor;
         ctx.lineWidth = 3 * this.scale;
         ctx.stroke();
+
+        // Draw trail effect
+        const trailLength = 5;
+        for (let i = 1; i <= trailLength; i++) {
+          const trailProgress = Math.max(0, sliderProgress - i * 0.02);
+          const trailPos = this.calculateSliderPosition(obj, trailProgress);
+          const trailScreenPos = this.playfieldToScreen(trailPos.x, trailPos.y);
+          
+          ctx.beginPath();
+          ctx.arc(trailScreenPos.x, trailScreenPos.y, radius * 0.6 * (1 - i / trailLength), 0, Math.PI * 2);
+          ctx.fillStyle = comboColor + Math.floor((1 - i / trailLength) * 100).toString(16).padStart(2, '0');
+          ctx.fill();
+        }
       }
     }
 
@@ -706,14 +853,12 @@ export class GameEngine {
 
     const radius = 150 * this.scale;
 
-    // Outer ring
     ctx.beginPath();
     ctx.arc(centerX.x, centerX.y, radius, 0, Math.PI * 2);
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
     ctx.lineWidth = 4 * this.scale;
     ctx.stroke();
 
-    // Spinning arc
     const angle = (currentTime / 300) % (Math.PI * 2);
     ctx.beginPath();
     ctx.arc(centerX.x, centerX.y, radius * 0.7, angle, angle + Math.PI * 1.5);
@@ -721,13 +866,11 @@ export class GameEngine {
     ctx.lineWidth = 6 * this.scale;
     ctx.stroke();
 
-    // Inner circle
     ctx.beginPath();
     ctx.arc(centerX.x, centerX.y, radius * 0.3, 0, Math.PI * 2);
     ctx.fillStyle = 'rgba(255, 107, 107, 0.3)';
     ctx.fill();
 
-    // Text
     ctx.font = `bold ${Math.max(16, 24 * this.scale)}px sans-serif`;
     ctx.fillStyle = '#FFFFFF';
     ctx.textAlign = 'center';
@@ -744,14 +887,12 @@ export class GameEngine {
     const color = judgment === '300' ? '#66CCFF' : judgment === '100' ? '#88B300' : '#FFAA00';
     const radius = this.circleRadius * this.scale * expand;
 
-    // Expanding ring
     ctx.beginPath();
     ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
     ctx.strokeStyle = color + Math.floor(alpha * 255).toString(16).padStart(2, '0');
     ctx.lineWidth = Math.max(2, 4 * this.scale * alpha);
     ctx.stroke();
 
-    // Flash
     if (elapsed < 100) {
       const flashAlpha = (1 - elapsed / 100) * 0.5;
       ctx.beginPath();
@@ -760,7 +901,6 @@ export class GameEngine {
       ctx.fill();
     }
 
-    // Judgment text
     const textAlpha = Math.max(0, 1 - (elapsed / 400));
     const textY = pos.y - radius - 15 * this.scale;
     ctx.font = `bold ${Math.max(14, 20 * this.scale)}px sans-serif`;
@@ -775,7 +915,6 @@ export class GameEngine {
     const pos = this.playfieldToScreen(x, y);
     const alpha = Math.max(0, 1 - (elapsed / 500));
 
-    // X mark
     const size = 20 * this.scale;
     ctx.strokeStyle = `rgba(255, 50, 50, ${alpha})`;
     ctx.lineWidth = Math.max(2, 3 * this.scale);
@@ -786,7 +925,6 @@ export class GameEngine {
     ctx.lineTo(pos.x - size, pos.y + size);
     ctx.stroke();
 
-    // MISS text
     ctx.font = `bold ${Math.max(14, 18 * this.scale)}px sans-serif`;
     ctx.fillStyle = `rgba(255, 50, 50, ${alpha})`;
     ctx.textAlign = 'center';
@@ -803,7 +941,7 @@ export class GameEngine {
       p.y += p.vy;
       p.vx *= 0.94;
       p.vy *= 0.94;
-      p.vy += 0.05; // gravity
+      p.vy += 0.05;
       p.life -= 0.025;
 
       if (p.life <= 0) {
@@ -827,7 +965,6 @@ export class GameEngine {
     const pos = this.playfieldToScreen(this.cursorPos.x, this.cursorPos.y);
     const size = 12 * this.scale;
 
-    // Outer glow
     const glowSize = this.cursorPressed ? size * 2.5 : size * 2;
     const glowColor = this.cursorPressed ? 'rgba(255, 100, 100,' : 'rgba(100, 200, 255,';
     const glowGrad = ctx.createRadialGradient(pos.x, pos.y, 0, pos.x, pos.y, glowSize);
@@ -838,21 +975,18 @@ export class GameEngine {
     ctx.fillStyle = glowGrad;
     ctx.fill();
 
-    // Cursor body
     ctx.beginPath();
     ctx.arc(pos.x, pos.y, size, 0, Math.PI * 2);
     const cursorColor = this.cursorPressed ? '#FF6B6B' : '#FFFFFF';
     ctx.fillStyle = cursorColor;
     ctx.fill();
 
-    // Cursor border
     ctx.beginPath();
     ctx.arc(pos.x, pos.y, size, 0, Math.PI * 2);
     ctx.strokeStyle = this.cursorPressed ? '#FF3333' : '#66CCFF';
     ctx.lineWidth = Math.max(2, 2.5 * this.scale);
     ctx.stroke();
 
-    // Inner dot
     ctx.beginPath();
     ctx.arc(pos.x, pos.y, size * 0.3, 0, Math.PI * 2);
     ctx.fillStyle = this.cursorPressed ? '#FFFFFF' : '#66CCFF';
@@ -863,16 +997,13 @@ export class GameEngine {
     const ctx = this.ctx;
     const comboX = this.playfieldToScreen(256, 40);
     
-    // Combo number
     ctx.font = `bold ${Math.max(24, 42 * this.scale)}px sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     
-    // Shadow
     ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
     ctx.fillText(`${this.state.combo}x`, comboX.x + 2, comboX.y + 2);
     
-    // Main text
     ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
     ctx.fillText(`${this.state.combo}x`, comboX.x, comboX.y);
   }
@@ -884,7 +1015,6 @@ export class GameEngine {
     const barX = (this.canvas.width - barWidth) / 2;
     const barY = this.canvas.height - 25 * this.scale;
 
-    // Background
     ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
     ctx.beginPath();
     const rx = barX - 4, ry = barY - 4, rw = barWidth + 8, rh = barHeight + 8, rr = 4;
@@ -900,11 +1030,9 @@ export class GameEngine {
     ctx.closePath();
     ctx.fill();
 
-    // Bar background
     ctx.fillStyle = 'rgba(50, 50, 50, 0.6)';
     ctx.fillRect(barX, barY, barWidth, barHeight);
 
-    // Draw recent hit errors
     const recent = this.hitErrors.slice(-30);
     for (let i = 0; i < recent.length; i++) {
       const error = recent[i];
@@ -921,7 +1049,6 @@ export class GameEngine {
     }
     ctx.globalAlpha = 1;
 
-    // Center line
     ctx.fillStyle = '#FFFFFF';
     ctx.fillRect(barX + barWidth / 2 - 1, barY - 3, 2, barHeight + 6);
   }
